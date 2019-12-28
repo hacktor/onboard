@@ -1,0 +1,114 @@
+#!/usr/bin/perl
+
+use Dancer qw(get post param);
+use Dancer::Plugin::Ajax;
+use threads;
+use threads::shared;
+use Time::HiRes qw(usleep gettimeofday);
+use POSIX       qw(strftime);
+use DBD::SQLite;
+
+my ($temp,$pres,$alti) :shared;
+my ($total_mem,$used_mem,$active_mem,$inactive_mem,$free_mem) :shared;
+my ($alt_corr,$dbfile,$launch_name,$record,$seconds,$startseconds) :shared;
+my $uptime :shared;
+
+$dbfile      = '/var/www/launches/sensors.db';
+$launch_name = 'Hacktor-Test';
+$alt_corr    = 0;
+$record      = 0;
+$seconds     = 180;
+
+threads->create( sub {
+    my $dbh = DBI->connect("dbi:SQLite:dbname=$dbfile","","");
+    my $sth = $dbh->prepare("INSERT INTO sensors (launchname,date,time,altitude,launchsecs,millisecs,startsecs,temperature,pressure) VALUES (?,?,?,?,?,?,?,?,?)");
+    while (1) {
+        ( $temp,$pres,$alti ) = qx( /usr/local/bin/sensors );
+        usleep(100);
+        if ($record) {
+            my ($secs,$msecs) = gettimeofday;
+            $msecs = int($msecs/1000);
+            my $date = strftime("%F", localtime($secs));
+            my $time = strftime("%T", localtime($secs));
+            $sth->execute($launch_name,$date,$time,sprintf("%.2f", $alti - $alt_corr),$secs - $startseconds,$msecs,$startseconds,sprintf("%.2f", $temp),sprintf("%.2f",  $pres / 100 ));
+        }
+    }
+});
+
+threads->create( sub {
+    while (1) {
+        ($total_mem,$used_mem,$active_mem,$inactive_mem,$free_mem) = qx( /usr/bin/vmstat -s );
+        $uptime = qx( /usr/bin/uptime );
+        sleep 5;
+    }
+});
+
+get '/sensors' => sub {
+    "<table><tr><td>Temperature:</td><td align=right>" . sprintf("%.2f", $temp) . "</td><td>Celsius</td></tr>" .
+    "<tr><td>Pressure:</td><td align=right>" . sprintf("%.2f",  $pres / 100 ) . "</td><td>milliBar</td></tr>" .
+    "<tr><td>Altitude:</td><td align=right>" . sprintf("%.2f",  $alti - $alt_corr ) . "</td><td>Meter</td></tr></table>\n"
+};
+
+get '/memory' => sub {
+    my $up = $uptime;
+    my $load = $uptime;
+    $up =~ s/.*up\s+//;
+    $up =~ s/,.*//;
+    $load =~ s/.*average: //;
+    $load =~ s/,.*//;
+    "<table><tr><td>$total_mem</td></tr><tr><td>$used_mem</td></tr><tr><td>$free_mem</td></tr>\n" .
+    "<tr><td></td></tr><tr><tr><td>Load avg: $load</td></tr>" .
+    "<tr><td>Uptime: $up</td></tr></table>\n"
+};
+
+get '/record/:action' => sub {
+    my $action = param('action');
+    if ("$action" eq 'start') {
+        $seconds = 180;
+        qx( sudo pkill -USR1 motion );
+        my ($secs,$msecs) = gettimeofday;
+        $startseconds = $secs;
+        $alt_corr = $alti;
+        if (defined(param('seconds'))) {
+            $seconds = param('seconds') if param('seconds') =~ /^[0-9]+$/;
+        }
+        $record = 1;
+
+        threads->create( sub {
+            # stop recording sensor data after specified seconds.
+            sleep $seconds;
+            $record = 0;
+            threads->detach();
+        });
+
+    } elsif ("$action" eq 'stop') {
+        $record = 0;
+    } elsif ("$action" eq 'launchname') {
+        $launch_name = param('name') if param('name') =~ /[a-zA-Z0-9\.\-\_]+/;
+        "Launch name set to " . $launch_name
+    }
+};
+
+get '/graph/:name' => sub {
+    my $name = param('name');
+    $launch_name = param('name') if param('name') =~ /[a-zA-Z0-9\.\-\_]+/;
+    $seconds = param('seconds') if param('seconds') =~ /^[0-9]+$/;
+    my $output = qx( /home/rocket/scripts/mkgraph $launch_name $seconds );
+    $output . "<img src=/launches/graphs/${launch_name}.png?" . time . ">"
+};
+
+get '/calibrate' => sub {
+    $alt_corr = $alti;
+};
+
+#get '/on' => sub {
+#    qx( /usr/local/bin/gpio mode 0 out );
+#    qx( /usr/local/bin/gpio write 0 1 );
+#};
+
+#get '/off' => sub {
+#    qx( /usr/local/bin/gpio mode 0 out );
+#    qx( /usr/local/bin/gpio write 0 0 );
+#};
+
+Dancer->dance;
