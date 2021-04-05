@@ -1,0 +1,59 @@
+#!/usr/bin/perl -w
+use strict;
+use GD;
+use GD::Graph::lines;
+use GD::Graph::points;
+use DBD::SQLite;
+
+exit unless $#ARGV == 1;
+
+# correctie; ignore first x seconds
+my $correction = 80;
+
+my $dbfile      = '/var/www/launches/sensors.db';
+my $launch_name = $ARGV[0];
+my $seconds     = $ARGV[1];
+my @x;
+my @y;
+
+my $graphdir = '/var/www/launches/graphs/';
+
+my $dbh = DBI->connect("dbi:SQLite:dbname=$dbfile","","");
+my $sth = $dbh->prepare("select date,launchsecs,millisecs,altitude from sensors where launchname = ? and launchsecs >= ?");
+
+$sth->execute($launch_name,$correction);
+my ($x,$y,$max) = (0,0,0);
+my $date;
+while (my $ref = $sth->fetchrow_hashref) {
+    my $centisecs = ($ref->{launchsecs} - $correction) * 100 + int( $ref->{millisecs} / 10 );
+    my $deltay = ($ref->{altitude} - $y) / ($centisecs - $x);
+    for my $dx ($x .. $centisecs - 1) {
+        push @x, $dx;
+        $y += $deltay;
+        push @y, $y;
+    }
+    $x = $centisecs;
+    $y = $ref->{altitude};
+    $max = $y > $max ? $y : $max;
+    $date = $ref->{date};
+    last if $centisecs > $seconds * 100;
+}
+print "<br>Graph for ${launch_name}, Maximum altitude : $max meters, duration $seconds seconds<br /><br />\n";
+
+my @data = ( \@x, \@y );
+
+my $graph = new GD::Graph::lines( );
+$date = '2015-08-09';
+$graph->set(
+        title             => "${launch_name} ${date}, altitude: ${max} meter",
+        x_label           => 'Time (centiseconds)',
+        y_label           => 'Height (meters)',
+        x_label_skip      => $seconds * 10,
+    );
+
+my $gd = $graph->plot( \@data );
+
+open OUT, ">${graphdir}/${launch_name}.png" or die "Couldn't open for output: $!";
+binmode(OUT);
+print OUT $gd->png( );
+close OUT;
